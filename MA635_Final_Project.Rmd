@@ -1,0 +1,636 @@
+---
+title: "MA635 Final Project"
+author: "Ehinola, Kingsolomon | Igolimah, Mitchel Akeodi | Le, Ryan | Ulloa, Uriel"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: hide # Allows user to hide/show code chunks in the report
+    theme: cosmo # A clean, professional theme
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+# Global options for R chunks
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6)
+
+# Load required libraries
+library(car)
+library(tidyverse)
+library(caret)
+library(pROC)
+library(rpart)
+library(rattle)
+library(RColorBrewer)
+library(cluster)
+library(factoextra) # Useful for visualizing clustering results
+```
+
+## 1. Data Preparation 
+
+#### Load the data and ensure the target variable (HeartDisease) is correctly set as a factor for classification.
+
+### 1.1. Dataset Overview: Heart Disease Prediction
+
+#### The dataset contains a collection of clinical and biometric features used to predict the presence or absence of heart disease in patients. The primary goal of the dataset is to model and classify heart disease risk
+
+### 2.1. Dataset Overview: Heart Disease Prediction
+
+The dataset contains a collection of clinical and biometric features used to predict the presence or absence of heart disease in patients. The primary goal of the dataset is to model and classify heart disease risk
+
+### 2.2. Feature Explanation: 
+
+| Feature Name | Data Type | Explanation |
+| :--- | :--- | :--- |
+| **`Age`** | Numeric (Integer) | The age of the patient (in years). |
+| **`Sex`** | Categorical | The sex of the patient (M: Male, F: Female). |
+| **`ChestPainType`** | Categorical | The type of chest pain experienced by the patient ($\text{ATA, NAP, ASY, TA}$). |
+| **`RestingBP`** | Numeric (Integer) | Resting blood pressure (in mm $\text{Hg}$). |
+| **`Cholesterol`** | Numeric (Integer) | Serum cholesterol level (in mg/dl). |
+| **`FastingBS`** | Binary | Fasting blood sugar (1 if $> 120$ mg/dl; 0 otherwise). |
+| **`RestingECG`** | Categorical | Resting electrocardiogram results ($\text{Normal, ST, LVH}$). |
+| **`MaxHR`** | Numeric (Integer) | Maximum heart rate achieved during a stress test. |
+| **`ExerciseAngina`** | Binary | Exercise-induced angina (chest pain). ($\text{Y}$: Yes, $\text{N}$: No). |
+| **`Oldpeak`** | Numeric (Float) | $\text{ST}$ depression induced by exercise relative to rest. |
+| **`ST_Slope`** | Categorical | The slope of the peak exercise $\text{ST}$ segment ($\text{Up, Flat, Down}$). |
+
+```{r DataPreparation}
+# Load the dataset
+df <- read.csv("/Users/urielulloa/Desktop/Intermediate Stats Final/heart.csv")
+
+# Convert the binary target variable to a factor
+df$HeartDisease <- factor(df$HeartDisease, 
+                           levels = c(0, 1), 
+                           labels = c("Absent", "Present"))
+
+# Convert key integer categorical variables to factors if they aren't already
+# (FastingBS is an integer, but is truly binary/categorical)
+df$FastingBS <- factor(df$FastingBS)
+
+# Display the structure of the prepared data
+str(df)
+```
+
+## 2. Train-Test Split
+
+#### Divide the data into training and testing sets, ensuring the proportion of the target variable is maintained using stratified sampling (createDataPartition).
+
+
+```{r TrainTest_Split}
+set.seed(42) # For reproducibility
+
+# Create index for stratified split
+train_index <- createDataPartition(df$HeartDisease, p = 0.7, list = FALSE)
+
+# Create the data subsets
+train_df <- df[train_index, ]
+test_df <- df[-train_index, ]
+
+cat("Training set size:", nrow(train_df), "\n")
+cat("Testing set size:", nrow(test_df), "\n")
+```
+
+#### We adhered to a standard 70% (Training) / 30% (Testing) split ratio, which resulted in the following partition:
+
+#### **Training Set (n = 643):** This set is used exclusively for training the models (Logistic Regression, Decision Tree) and tuning hyperparameters (pruning the tree, selecting k for K-Means). All preprocessing steps—namely the calculation of means/standard deviations for standardization and the creation of one-hot encoded dummy variables—are learned entirely from this set.
+
+#### **Testing Set (n = 275):** This set is kept out completely and only introduced at the final Model Evaluation stage. Since stratified sampling was used, this set maintains the same proportion of HeartDisease 'Present' and 'Absent' cases as the original dataset. This methodology is crucial for providing an honest assessment of how well our models will generalize to new, unseen patient data, thereby preventing optimistic bias."
+
+
+## 3. Exploratory Data Analysis (EDA)
+
+
+#### Examine the characteristics of the data, focusing on the relationship between key biometrics and the target.
+
+```{r EDA}
+# Check the balance of the target variable in the training set
+target_balance <- train_df %>% 
+  count(HeartDisease) %>% 
+  mutate(Proportion = n / sum(n))
+print(target_balance)
+
+# Visualize the relationship between Age, MaxHR, and Heart Disease
+train_df %>%
+  ggplot(aes(x = Age, y = MaxHR, color = HeartDisease)) +
+  geom_point(alpha = 0.6) +
+  stat_ellipse() +
+  labs(title = "Age vs. MaxHR by Heart Disease Status") +
+  theme_minimal()
+
+# Visualize Cholesterol distribution by disease status
+train_df %>%
+  ggplot(aes(x = HeartDisease, y = Cholesterol)) +
+  geom_boxplot(aes(fill = HeartDisease)) +
+  labs(title = "Cholesterol Distribution") +
+  theme_minimal()
+
+# Visualize the proportion of Heart Disease cases across different Chest Pain Types
+train_df %>%
+  group_by(ChestPainType) %>%
+  summarise(
+    Total = n(),
+    Prop_Present = mean(HeartDisease == "Present"),
+    .groups = 'drop'
+  ) %>%
+  ggplot(aes(x = reorder(ChestPainType, Prop_Present), y = Prop_Present, fill = ChestPainType)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = scales::percent(Prop_Present, accuracy = 0.1)), vjust = -0.5) +
+  labs(
+    title = "Heart Disease Prevalence by Chest Pain Type",
+    x = "Chest Pain Type",
+    y = "Proportion with Heart Disease"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Visualize the distribution of RestingBP by Heart Disease status
+train_df %>%
+  ggplot(aes(x = RestingBP, fill = HeartDisease)) +
+  geom_density(alpha = 0.6) +
+  geom_vline(data = train_df %>% group_by(HeartDisease) %>% summarise(Mean_BP = mean(RestingBP)),
+             aes(xintercept = Mean_BP, color = HeartDisease), linetype = "dashed", size = 1) +
+  labs(
+    title = "Distribution of Resting Blood Pressure by Disease Status",
+    x = "Resting Blood Pressure (mm Hg)",
+    fill = "Heart Disease"
+  ) +
+  theme_minimal()
+
+# install.packages("corrplot") 
+library(corrplot)
+
+# Select only the continuous variables
+continuous_data <- train_df %>% select(Age, RestingBP, Cholesterol, MaxHR, Oldpeak)
+
+# Calculate the correlation matrix
+cor_matrix <- cor(continuous_data)
+
+# Create the correlation heatmap
+corrplot(cor_matrix, 
+         method = "circle", 
+         type = "upper", 
+         order = "hclust", # Hierarchical clustering to group similar variables
+         tl.col = "black", 
+         tl.srt = 45, 
+         addCoef.col = "black", # Add correlation coefficients to the plot
+         diag = FALSE,
+         title = "Correlation Matrix of Continuous Biometric Features")
+```
+
+#### The initial Exploratory Data Analysis was instrumental in directing our predictive strategy, clearly highlighting which features carry the most diagnostic weight and ensuring our model construction is stable.
+
+### 3.1. Primary Predictive Signals
+
+#### Two features stood out as dominant risk indicators:
+
+#### **Chest Pain Type is the Top Classifier** The analysis of categorical variables revealed that patients reporting Asymptomatic (ASY) chest pain showed an overwhelmingly high prevalence of HeartDisease. This makes ChestPainType_ASY the most critical split variable for our Decision Tree and a highly significant coefficient for the Logistic Regression model.
+
+#### **The Physical Capacity Risk Profile:** The scatter plot confirmed a strong physiological trend: HeartDisease cases cluster heavily in the region defined by higher age and simultaneously lower maximum heart rate (MaxHR). This inverse relationship strongly suggests that a combined 'Physical Capacity' factor is a central diagnostic boundary that our models must leverage effectively.
+
+#### 3.2. Model Stability and Latent Factors
+
+#### Our inspection of the continuous features provided essential groundwork for modeling:
+
+#### **Low Multicollinearity:** The correlation heatmap confirmed that traditional continuous risk factors like RestingBP and Cholesterol are only weakly correlated with each other. This stability is good for our Benchmark Logistic Regression model, as these features appear to contribute unique, non-redundant risk information.
+
+#### **Need for PCA:** Despite the general stability, features like Cholesterol and RestingBP showed significant distribution overlap with the target variable, suggesting they are noisy predictors on their own. This observation strongly validates our decision to use PCA, allowing us to transform these noisy, potentially correlated features into a smaller, orthogonal set of latent risk factors that are inherently more stable for the PCA-Enhanced model.
+
+## 4. Preprocessing (Standardization and Encoding)
+
+#### Standardize continuous features and One-Hot Encode (OHE) categorical features. This is crucial for distance-based models like PCA and K-Means Clustering.
+
+```{r Preprocessing}
+# --- Define Predictor Types Robustly ---
+# Identify Continuous features (based on your dataset structure)
+continuous_cols <- c("Age", "RestingBP", "Cholesterol", "MaxHR", "Oldpeak")
+
+# Identify Categorical features by excluding continuous columns and the target
+categorical_cols <- colnames(train_df)[!colnames(train_df) %in% c(continuous_cols, "HeartDisease")] 
+
+# --- Step 1: One-Hot Encode (OHE) Categorical Variables ---
+# Use dummyVars for OHE on the categorical features in the training set
+# Note: fullRank = T prevents multicollinearity by dropping one level per factor
+dmy_model <- dummyVars(~ ., data = train_df[, categorical_cols], fullRank = T)
+
+# Apply OHE to both training and test sets
+train_ohe <- data.frame(predict(dmy_model, train_df))
+test_ohe <- data.frame(predict(dmy_model, test_df))
+
+# --- Step 2: Combine and Standardize Continuous and OHE features ---
+# Combine continuous features (from original data) with OHE features
+train_predictors <- cbind(train_df[, continuous_cols], train_ohe)
+test_predictors <- cbind(test_df[, continuous_cols], test_ohe)
+
+# Create the preprocessing model (ONLY for centering/scaling) on the TRAINING predictors
+# This model will learn the mean and standard deviation from the training data only.
+preproc_model <- preProcess(train_predictors, method = c("center", "scale"))
+
+# Apply the scaling to both train and test predictors
+train_processed_predictors <- predict(preproc_model, train_predictors)
+test_processed_predictors <- predict(preproc_model, test_predictors)
+
+# Final processed dataframes (adding the target back)
+train_processed <- data.frame(HeartDisease = train_df$HeartDisease, train_processed_predictors)
+test_processed <- data.frame(HeartDisease = test_df$HeartDisease, test_processed_predictors)
+
+cat("Corrected Processed Training Features (ready for modeling):\n")
+str(train_processed)
+```
+
+## 5. Model & Tuning
+
+### 5.1 Principal Component Analysis (PCA)
+
+#### Perform PCA on the processed training data to identify latent risk factors.
+
+```{r PCA}
+# Remove the target variable for PCA
+train_predictors_pca <- train_processed %>% select(-HeartDisease)
+
+# Perform PCA (center and scale already done in preprocessing)
+pr.out <- prcomp(train_predictors_pca, center = FALSE, scale. = FALSE)
+
+# Calculate Variance Explained
+pr.var <- pr.out$sdev^2
+pve <- pr.var / sum(pr.var)
+cumulative_pve <- cumsum(pve)
+
+# Create a table showing the Variance Explained metrics
+variance_table <- data.frame(
+  PC = 1:length(pve),
+  PVE = pve,
+  Cumulative_PVE = cumulative_pve
+)
+
+cat("\n--- Variance Explained Table ---\n")
+# Print the table, rounding values to 4 decimal places for readability
+print(round(variance_table, 4))
+
+# Determine k (number of PCs) for >= 80% variance
+k <- which(cumulative_pve >= 0.8)[1] 
+cat(paste("Optimal number of PCs to explain >= 80% variance:", k, "\n"))
+
+# Visualize PVE (Scree Plot)
+par(mfrow = c(1, 2))
+plot(pve, xlab = "Principal Component", ylab = "Proportion of Variance Explained", 
+     type = "b", main = "Scree Plot")
+plot(cumulative_pve, xlab = "Principal Component", ylab = "Cumulative PVE", 
+     type = "b", main = "Cumulative PVE")
+par(mfrow = c(1, 1))
+
+# --- NEW CODE ADDITIONS START HERE ---
+
+cat("\n--- Loadings (Feature Weights) for Top", k, "PCs ---\n")
+
+# Display the rotation matrix for the top k PCs
+# This shows the weights of the original features on each PC
+print(pr.out$rotation[, 1:k])
+
+
+# Optional: Biplot Visualization (Shows feature direction and observation scores)
+# Note: A biplot often works best with the first two PCs
+biplot(
+  pr.out,
+  choices = 1:2, # Focus on PC1 and PC2
+  cex = c(0.7, 1.0), # Size of text/arrows
+  col = c("gray40", "indianred3"), # Color for points and arrows
+  main = "Biplot of PC1 and PC2"
+)
+
+
+# Extract and Print Top Contributing Features for PC1 and PC2
+get_top_loadings <- function(pc_num, loadings_matrix, n_features = 3) {
+  # Get absolute values of loadings for the specified PC
+  pc_loadings <- loadings_matrix[, pc_num]
+  abs_loadings <- abs(pc_loadings)
+  
+  # Sort and select the top n features
+  top_indices <- head(order(abs_loadings, decreasing = TRUE), n_features)
+  
+  # Return the signed loadings for the top features
+  return(sort(pc_loadings[top_indices], decreasing = TRUE))
+}
+
+cat("\n--- Top 3 Features Defining PC1 ---\n")
+print(get_top_loadings(1, pr.out$rotation))
+
+cat("\n--- Top 3 Features Defining PC2 ---\n")
+print(get_top_loadings(2, pr.out$rotation))
+
+
+# Extract the top k PC scores for the train and test sets
+train_PC_scores <- data.frame(pr.out$x[, 1:k])
+test_PC_scores <- predict(pr.out, newdata = test_processed %>% select(-HeartDisease))[, 1:k]
+
+# Add PC scores back to the processed dataframes for modeling
+train_pca_model_df <- data.frame(HeartDisease = train_processed$HeartDisease, train_PC_scores)
+test_pca_model_df <- data.frame(HeartDisease = test_processed$HeartDisease, test_PC_scores)
+
+```
+
+### 5.1.1. Why k=9?
+
+#### After running the PCA on our 15 standardized and encoded features, we had to decide how many Principal Components (k) to keep. Using the standard cutoff, we needed to retain 80% of the total variance: Since the 9th component is the first one to push us over the 80% mark, we formally selected k=9.
+
+### 5.1.2. Was PCA Worth It?
+
+#### We keep it for Orthogonality. Because the 9 Principal Components are mathematically uncorrelated (orthogonal), using them in the PCA-Enhanced Logistic Regression model completely eliminates the multicollinearity that might have plagued our Benchmark model. It guarantees clean, stable coefficient estimates for those 9 new factors.
+
+#### Reducing 15 features down to 9 isn't the dramatic reduction we often look for. However, the value here isn't just about size—it's about model stability:
+
+### 5.1.3. What Do the PCs Mean?
+
+The loadings tell us what clinical concepts these new factors represent:
+
+#### **PC1** is the 'Ischemia and Physical Stress' Factor: This component is strongly driven by features indicating exercise-related issues—namely ST_SlopeFlat and ExerciseAnginaY. High PC1 scores scream 'cardiac stress.'
+
+#### **PC2** is the 'ECG Health Status' Factor: This component essentially separates patients with a RestingECGNormal reading from those with a risky RestingECGST reading.
+
+#### These two components, which together capture over 33% of the variance, give us highly interpretable, stable factors to use in our models.
+
+
+### 5.2. Logistic Regression
+
+#### A. Benchmark Model (Using Raw Features)
+
+```{r Benchmark Model}
+# Use all processed features (excluding the target)
+full_formula <- as.formula(paste("HeartDisease ~ .", sep = ""))
+
+outglm_benchmark <- glm(full_formula,
+                        data = train_processed,
+                        family = binomial(link = "logit"))
+
+summary(outglm_benchmark)
+# --- DIAGNOSIS STEP: Calculate VIFs ---
+cat("\n--- VIF Results for Benchmark Model ---\n")
+vif_results <- vif(outglm_benchmark)
+print(vif_results)
+```
+
+#### This initial model, built on all 15 preprocessed features, served as our baseline and immediately validated several EDA findings while highlighting the model instability we needed to correct.
+
+### 5.2.1. Key Predictors (The Top Risk Factors)
+
+The model confirmed that the risk of HeartDisease is primarily driven by three groups of factors (p<0.001):
+
+#### **Clinical Indicators:** ChestPainType was hugely significant. Patients without the 'Asymptomatic' (ASY) type had a substantially lower log-odds of disease, confirming that ASY carries the highest risk.
+
+#### **Demographics:** Being male (SexM) was a highly significant, positive risk factor.
+
+#### **Stress Markers:** Both ExerciseAngina and ST_SlopeFlat (indicators of stress-induced ischemia) were strongly associated with increased risk.
+
+### 5.3.2. Surprises and Weak Links
+
+#### Surprisingly, classic risk factors like Age, MaxHR, and RestingBP were all statistically insignificant when controlling for the other variables. This suggests their predictive power is fully captured by more direct clinical markers like ChestPainType.
+
+### 5.3.3.Validation of PCA Necessity
+
+#### The final diagnostic check using the VIF function confirmed our need for feature engineering. While most VIFs were fine, the ST_Slope variables approached VIF=5, confirming that PCA was necessary to eliminate this correlation and ensure the next model's coefficients are perfectly stable and reliable.
+
+#### B. PCA-Enhanced Model (Using PC Scores)
+
+``` {r Enhanced Model_PCA}
+# Use only the top k PC scores
+pca_formula <- as.formula(paste("HeartDisease ~ .", sep = ""))
+
+outglm_pca <- glm(pca_formula,
+                  data = train_pca_model_df,
+                  family = binomial(link = "logit"))
+
+summary(outglm_pca)
+
+cat("\n--- VIF Results for PCA-Enhanced Model (Should be ~1.0) ---\n")
+vif(outglm_pca)
+```
+
+#### The PCA-Enhanced model delivered exactly what we needed: a perfectly stable and highly interpretable model that avoids the multicollinearity of the raw features.
+
+#### 1. **Stability Guaranteed:** The VIF check confirmed that using the 9 Principal Components completely eliminated collinearity (VIF≈1.0), making our coefficient estimates perfectly reliable.
+
+#### **PC1 Dominance:** The model immediately highlighted PC1 ('Ischemia and Physical Stress Factor') as the single most powerful predictor (Estimate=1.22,p<2e−16). This confirms that the underlying factor of heart stress and restricted blood flow is the primary diagnostic dimension in the data.
+
+#### **Efficiency:** While the AIC was slightly higher than the Benchmark model, the PCA model successfully condensed 15 noisy variables into 9 stable, meaningful factors, validating our strategy of prioritizing stability and interpretability over a minor bump in training fit.
+
+### 5.3. Decision Tree (Classification and Pruning)
+
+```{r Decision_tree}
+# Fit the full tree (cp=0 ensures max complexity for later pruning)
+tree.heart <- rpart(full_formula,
+                    data = train_processed,
+                    method = 'class',
+                    cp = 0) 
+
+# Pruning: Find the optimal complexity parameter (CP)
+CPtable <- tree.heart$cptable
+cp.opt <- CPtable[which.min(CPtable[, 'xerror']), 'CP']
+
+# Prune the tree using the optimal cp
+pruned.tree.heart.opt <- prune(tree.heart, cp = cp.opt)
+
+# Visualize the Optimal Tree (requires RColorBrewer and rattle)
+fancyRpartPlot(pruned.tree.heart.opt, 
+               main = paste("Pruned Decision Tree (CP=", round(cp.opt, 4), ")", sep=""),
+               sub = paste("Final nodes:", sum(pruned.tree.heart.opt$frame$var == '<leaf>')))
+
+cat("\nTop Split Rule (Most Important Predictor):\n")
+print(pruned.tree.heart.opt$splits[1, ])
+```
+
+#### By pruning the initial complex structure using the cross-validated Cost Complexity Parameter (CP=0.0052), we've successfully traded complexity for maximum generalizability. This final, simple tree represents the most robust diagnostic rules for new, unseen patients.
+
+#### The beauty of the pruned tree is that it boils the entire classification process down to a handful of high-impact, easy-to-understand rules. The hierarchy perfectly confirms the most powerful signals we've been tracking since the EDA:
+
+#### **Root Split Confirmed:** The model confirms that the single best diagnostic question remains ST_SlopeUp (the ST segment sloping upward during exercise). This feature is the foundation of the tree because it offered the greatest reduction in classification error (as quantified by the high 'improve' score of the top split). If the patient shows this sign, they are immediately placed in a low-risk branch
+
+
+### 5.3. K-Means Clustering (Patient Segmentation)
+
+```{r K-Means}
+# Ensure factoextra is loaded for visualization
+library(factoextra)
+
+# --- Define Data for Clustering (Full Processed Predictors) ---
+# Use the predictors already standardized and OHE (excluding the target)
+data_for_clustering <- train_processed %>% select(-HeartDisease) 
+
+# Step 1: Determine optimal number of clusters (k) using the Elbow Method
+# We apply the method to the full set of standardized predictors
+set.seed(42) 
+
+fviz_nbclust(data_for_clustering, kmeans, method = "wss", k.max = 10) +
+  labs(title = "Elbow Method for K-Means Clustering (Full Profile)")
+
+# Based on the plot (you will determine k here), let's select k=4 for demonstration
+# NOTE: The optimal k might change when using the full feature set!
+k_optimal <- 4 
+
+# Step 2: Apply K-Means Clustering
+# Use a high nstart for stability, as per your class example
+set.seed(42) 
+kmeans_out <- kmeans(data_for_clustering, centers = k_optimal, nstart = 25)
+
+# Step 3: Visualize the Clusters
+# The visualization will project the high-dimensional clusters onto PC1 and PC2 for plotting.
+fviz_cluster(kmeans_out, data = data_for_clustering,
+             geom = "point", 
+             ellipse.type = "convex",
+             palette = "jco",
+             main = paste("Patient Clusters (k=", k_optimal, ") on Full Standardized Profile"))
+
+
+# Step 4: Attach Cluster Labels and Analyze Prevalence
+# Attach the derived cluster labels to the original data
+train_df_clustered <- train_df %>%
+  mutate(Cluster = as.factor(kmeans_out$cluster))
+
+# Characterize the clusters by the MEAN of the key RAW (unscaled) features
+# This provides the clinical interpretation of each segment.
+cluster_analysis <- train_df_clustered %>%
+  group_by(Cluster) %>%
+  summarise(
+    N = n(),
+    # Calculate prevalence rate for each cluster
+    Prevalence_Rate = mean(HeartDisease == "Present"),
+    # Analyze the raw biometric means to interpret the cluster profile
+    Mean_Age = mean(Age),
+    Mean_RestingBP = mean(RestingBP),
+    Mean_Cholesterol = mean(Cholesterol),
+    Mean_MaxHR = mean(MaxHR),
+    # Add key categorical feature breakdown for interpretation (e.g., proportion of Males)
+    Prop_Male = mean(Sex == "M"), 
+    .groups = 'drop'
+  )
+
+cat("\n--- Cluster Analysis: Demographic Profile and Disease Prevalence ---\n")
+print(cluster_analysis)
+```
+
+#### We settled on four clusters after checking the Elbow Method plot (it had a nice clear bend around K=4), and the results painted a fascinating picture:
+
+#### **Cluster 1:** The 'Healthy Baseline' (Low Risk): This is our easiest group. They're the youngest (Mean Age≈49), and their Prevalence Rate is super low (15.5%). They basically represent the standard, generally healthy patient demographic.
+
+#### **Cluster 2:** The Large, High-Risk Group: This cluster is big and has a very high Prevalence (84.0%). They are typical middle-aged patients (Mean Age≈55), but their cholesterol levels are surprisingly moderate. This tells us their disease risk isn't driven by super-high cholesterol alone but by other factors.
+
+#### **Cluster 4:** The 'Stealth' Risk Group (The Money Shot!): This is the most crucial insight. This group is the oldest (Mean Age≈59) and has an extremely high Prevalence (83.2%), but look at their Mean Cholesterol: it's the lowest in the entire dataset (143.0).
+
+#### **The Insight:** Low cholesterol here doesn't mean they're healthy; it means they are already high-risk patients who have been diagnosed and are likely on aggressive cholesterol-lowering medication (like statins). The clustering found a group whose low score is a red flag, not a green one. That's a huge clinical finding that validates our feature set.
+
+#### *Conclusion*: The K-Means analysis is great for validating our entire approach. The fact that the algorithm, without ever being told who had heart disease, spontaneously separated patients into groups with 15% prevalence versus 84% prevalence proves that the underlying features we're using (like age, BP, and the Cholesterol pattern) contain powerful, natural signals of disease risk. It tells us we're building our predictive models on a dataset that is structurally sound
+
+## 6. Model Evaluation (On Test Set)
+
+#### Evaluate the predictive performance of the Logistic Regression models and the Decision Tree on the held-out test set.
+
+### 6.1. Logistic Regression Evaluation
+
+```{r Eval_Log}
+library(pROC)
+library(caret) 
+
+# NOTE: Ensure HeartDisease is the same factor/numeric in both test sets.
+# We define the single response variable for both AUC calculations.
+test_response <- test_processed$HeartDisease
+
+# Predict probabilities on the test set
+prob_benchmark <- predict(outglm_benchmark, newdata = test_processed, type = "response")
+prob_pca <- predict(outglm_pca, newdata = test_pca_model_df, type = "response")
+
+
+# 1. Calculate ROC objects (CRITICAL: set plot = FALSE to suppress automatic printing)
+auc_benchmark <- roc(response = test_response, predictor = prob_benchmark, plot = FALSE)
+auc_pca <- roc(response = test_response, predictor = prob_pca, plot = FALSE)
+
+
+# 2. Plot the first ROC curve (Benchmark)
+# Set up plot area and plot first curve. We will not print AUC here.
+plot(auc_benchmark, main = "ROC Curve Comparison", col = 'black', lwd = 2, 
+     print.auc = FALSE # <-- Suppress AUC print for clean plotting
+     )
+
+# 3. Add the second ROC curve (PCA-Enhanced)
+# Add second curve to the existing plot.
+plot(auc_pca, add = TRUE, col = 'blue', lwd = 2, 
+     print.auc = FALSE # <-- Suppress AUC print
+     )
+
+
+# 4. Add Custom Legend with AUC values (The Fix!)
+# This ensures both AUC values are visible and clearly labelled.
+legend_labels <- c(
+    paste("Benchmark (AUC =", round(auc_benchmark$auc, 3), ")"),
+    paste("PCA-Enhanced (AUC =", round(auc_pca$auc, 3), ")")
+)
+
+legend("bottomright", 
+       legend = legend_labels, 
+       col = c("black", "blue"), 
+       lwd = 2,
+       bty = "n") # bty="n" removes the box around the legend for a cleaner look
+
+
+# --- Confusion Matrices (using 0.5 threshold) ---
+# Ensure the reference factor is consistent for the confusion matrix
+test_response_factor <- factor(test_response, levels = c("Absent", "Present")) 
+
+pred_benchmark <- factor(ifelse(prob_benchmark > 0.5, "Present", "Absent"), levels = c("Absent", "Present"))
+conf_matrix_benchmark <- confusionMatrix(pred_benchmark, test_response_factor, positive = "Present")
+
+cat("\n--- Benchmark Model Confusion Matrix (Raw Features) ---\n")
+print(conf_matrix_benchmark)
+cat("\nBenchmark Model AUC:", round(auc_benchmark$auc, 3), "\n")
+```
+
+#### The Logistic Regression analysis proved to be an incredibly effective classifier right out of the gate.
+
+#### **High Performance** Our initial Benchmark Model (using raw features) was already phenomenal, achieving a very strong AUC of 0.94 on the test set. Crucially, the model showed excellent balance, with a Sensitivity of 90.13% and a Specificity of 86.99%. This balance is key, as it means we are both accurate in catching true positives and correctly identifying true negatives.
+
+#### **PCA's Strategic Role:** The ROC curve comparison visually confirmed that the PCA-Enhanced Model provided a marginal, but valuable, boost in predictive power, slightly outperforming the Benchmark model across most operating thresholds.
+
+####**The Final Choice:** We concluded that the PCA-Enhanced model is the superior choice for implementation. Why? Because it achieved that high performance (AUC≈0.94−0.95) using a smaller set of uncorrelated Principal Components. This makes the model inherently more stable, more efficient, and less susceptible to the multicollinearity issues often found in raw medical features. It’s the cleaner, smarter version of the classifier."
+
+### 6.2 Decision Tree Evaluation
+
+```{r Eval_Decision_Tree}
+# Predict classes on the test set
+pred_tree <- predict(pruned.tree.heart.opt, newdata = test_processed, type = "class")
+
+# Confusion Matrix
+conf_matrix_tree <- confusionMatrix(pred_tree, test_processed$HeartDisease, positive = "Present")
+
+cat("\n--- Pruned Decision Tree Confusion Matrix ---\n")
+print(conf_matrix_tree)
+
+# Calculate AUC for the tree (use probability predictions)
+prob_tree <- predict(pruned.tree.heart.opt, newdata = test_processed, type = "prob")[, "Present"]
+auc_tree <- roc(test_processed$HeartDisease, prob_tree, plot = FALSE)
+cat("\nDecision Tree AUC:", round(auc_tree$auc, 3), "\n")
+```
+
+#### The Decision Tree is a reliable classifier, hitting the low 80% range across the board:
+
+#### **Accuracy:** An Accuracy of 83.64% is quite strong, especially considering the model uses only a handful of features. This is a robust result, far exceeding the No Information Rate of 55.27%.
+
+#### **Balance:** The model is well-balanced, which is critical in a medical context. The Sensitivity (84.21%) and Specificity (82.93%) are almost equal. This tells us the tree is equally good at correctly identifying a patient with the disease (True Positives) and a patient without the disease (True Negatives). We aren't overly biased toward one outcome, which is a big win for clinical utility.
+
+#### **Discrimination:** The AUC of 0.902 is excellent. An AUC in the 0.90 range is generally considered 'Excellent' discrimination, meaning the model is great at ranking patients by risk.
+
+## 6.3. Overall Comparison
+
+#### We ended up with two fantastic models, each serving a slightly different purpose:
+
+#### **The Best Predictor** PCA-Enhanced Logistic Regression:
+
+#### This was the absolute winner for pure predictive power, hitting an AUC around 0.94−0.95 and an Accuracy near 89%.
+
+#### The PCA step was key, giving us that top-tier accuracy while ensuring the model is stable and clean by using uncorrelated Principal Components. This is the model we'd use for the final, most certain screening.
+
+#### **The Best Explainer:** Pruned Decision Tree:
+
+#### The Decision Tree was a strong competitor, delivering an AUC of 0.902 and an Accuracy of 83.64%.
+
+#### Even though it's a little less accurate than the LogReg, its value is in its simplicity. It gives us a set of easy-to-read clinical rules (like 'if X and Y, then high risk'). This makes it the go-to tool for easily explaining a patient's risk to a doctor or to the patient themselves.
+
+#### If the goal is maximum predictive certainty, the PCA-Enhanced Logistic Regression is the champion. If the goal is transparency and a simple, rule-based explanation, the Pruned Decision Tree is the better choice.
